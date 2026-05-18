@@ -13,3 +13,4 @@ $(TARGET): $(SRC)
 
 clean:
 	rm -f $(TARGET)
+rebuild: clean all
