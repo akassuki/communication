@@ -305,10 +305,12 @@ static int build_frame(uint8_t *out, size_t out_sz,
                        uint8_t dst_addh, uint8_t dst_addl, uint8_t ch,
                        const uint8_t *body, size_t body_len)
 {
-    (void)dst_addh; (void)dst_addl; (void)ch;
-    if (body_len > out_sz) return -1;
-    memcpy(out, body, body_len);
-    return (int)body_len;
+    if (E32_PFX_LEN + body_len > out_sz) return -1;
+    out[0] = dst_addh;
+    out[1] = dst_addl;
+    out[2] = ch;
+    memcpy(out + E32_PFX_LEN, body, body_len);
+    return (int)(E32_PFX_LEN + body_len);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -322,7 +324,7 @@ static int send_poll(int fd, const Config *cfg)
     body[2] = cfg->gw_addl;
     body[3] = xor_chk(body, 3);
 
-    uint8_t frame[POLL_FRAME_LEN];
+    uint8_t frame[E32_PFX_LEN + POLL_FRAME_LEN];
     int len = build_frame(frame, sizeof(frame),
                           DEF_ADDH, cfg->node_addl, cfg->ch,
                           body, POLL_FRAME_LEN);
@@ -344,7 +346,7 @@ static int send_ack(int fd, const Config *cfg, uint8_t frag_idx)
         CMD_ACK, DEF_ADDH, cfg->gw_addl, frag_idx
     };
 
-    uint8_t frame[ACK_FRAME_LEN];
+    uint8_t frame[E32_PFX_LEN + ACK_FRAME_LEN];
     int len = build_frame(frame, sizeof(frame),
                           DEF_ADDH, cfg->node_addl, cfg->ch,
                           body, ACK_FRAME_LEN);
@@ -372,7 +374,7 @@ static int send_ota(int fd, const Config *cfg)
     body[5] = cfg->ota_addl;
     body[6] = xor_chk(body, 6);
 
-    uint8_t frame[OTA_FRAME_LEN];
+    uint8_t frame[E32_PFX_LEN + OTA_FRAME_LEN];
     int len = build_frame(frame, sizeof(frame),
                           DEF_ADDH, cfg->node_addl, cfg->ch,
                           body, OTA_FRAME_LEN);
