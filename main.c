@@ -92,7 +92,9 @@
 #define MAX_JSON_LEN      512
 #define E32_PFX_LEN       3     /* [DST_ADDH][DST_ADDL][CH] */
 
-#define FRAG_TIMEOUT_MS   10000
+#define FRAG_TIMEOUT_MS   12000
+#define FRAG_RETRY_MAX    3
+#define PAYLOAD_TIMEOUT_MS   50000
 #define ACK_DELAY_MS      100
 
 /* ════════════════════════════════════════════════════════════
@@ -427,7 +429,7 @@ static int recv_frag(int fd, int timeout_ms, DataFrag *f)
         return EXIT_BADFRAM;
     }
 
-    n = serial_read(fd, f->payload, f->pay_len, 2000);
+    n = serial_read(fd, f->payload, f->pay_len, PAYLOAD_TIMEOUT_MS);
     if (n < (int)f->pay_len) {
         WARN("Payload thiếu: cần %d, nhận %d bytes", f->pay_len, n);
         return EXIT_TIMEOUT;
@@ -446,8 +448,17 @@ static int recv_frag(int fd, int timeout_ms, DataFrag *f)
 static int poll_node(int fd, const Config *cfg,
                      char *json_out, size_t json_size)
 {
-    if (send_poll(fd, cfg) != EXIT_OK) {
-        ERR("Gửi POLL thất bại");
+    tcflush(fd, TCIOFLUSH);
+
+    int rc = EXIT_ERR;
+    for (int i = 0; i < FRAG_RETRY_MAX; i++) {
+        rc = send_poll(fd, cfg);
+        if (rc == EXIT_OK) break;
+        WARN("Gửi POLL thất bại lần %d/%d", i + 1, FRAG_RETRY_MAX);
+        sleep_ms(500);
+    }
+    if (rc != EXIT_OK) {
+        ERR("Gửi POLL thất bại sau %d lần", FRAG_RETRY_MAX);
         return EXIT_ERR;
     }
 
@@ -458,30 +469,56 @@ static int poll_node(int fd, const Config *cfg,
 
     while (1) {
         DataFrag frag;
-        int rc = recv_frag(fd, FRAG_TIMEOUT_MS, &frag);
+        int frag_ok = 0;
 
-        if (rc == EXIT_TIMEOUT) {
-            ERR("Timeout chờ fragment %d (sau %dms)", expect, FRAG_TIMEOUT_MS);
+        for (int retry = 0; retry < FRAG_RETRY_MAX; retry++) {
+            rc = recv_frag(fd, FRAG_TIMEOUT_MS, &frag);
+
+            if (rc == EXIT_OK) {
+                if (frag.addh != DEF_ADDH || frag.addl != cfg->node_addl) {
+                    WARN("Fragment từ node [%02X:%02X] khác, bỏ qua",
+                         frag.addh, frag.addl);
+                    retry--;
+                    continue;
+                }
+                frag_ok = 1;
+                break;
+            }
+
+            if (rc == EXIT_TIMEOUT) {
+                WARN("Timeout fragment %d, retry %d/%d",
+                     expect, retry + 1, FRAG_RETRY_MAX);
+                if (expect > 0) {
+                    sleep_ms(ACK_DELAY_MS);
+                    send_ack(fd, cfg, (uint8_t)(expect - 1));
+                    LOG("Re-ACK(%d) để kích node gửi lại fragment %d",
+                        expect - 1, expect);
+                } else {
+                    sleep_ms(500);
+                    tcflush(fd, TCIOFLUSH);
+                    send_poll(fd, cfg);
+                    LOG("Re-POLL vì fragment 0 timeout");
+                }
+                continue;
+            }
+
+            /* EXIT_BADFRAM */
+            WARN("BADFRAM fragment %d, retry %d/%d",
+                 expect, retry + 1, FRAG_RETRY_MAX);
+            tcflush(fd, TCIFLUSH);
+            sleep_ms(200);
+        }
+
+        if (!frag_ok) {
+            ERR("Fragment %d thất bại sau %d lần retry", expect, FRAG_RETRY_MAX);
             return EXIT_TIMEOUT;
         }
-        if (rc == EXIT_BADFRAM) {
-            ERR("Frame lỗi tại fragment %d", expect);
-            return EXIT_BADFRAM;
-        }
 
-        if (frag.addl != cfg->node_addl) {
-            WARN("Fragment từ node lạ [%02X:%02X] – bỏ qua",
-                 frag.addh, frag.addl);
-            continue;
-        }
-
-        if (total_frags < 0) {
+        if (total_frags < 0)
             total_frags = (int)frag.frag_total;
-            LOG("Session: tổng %d fragment(s)", total_frags);
-        }
 
         if ((int)frag.frag_idx != expect) {
-            ERR("Thứ tự sai: nhận frag[%d], mong frag[%d]",
+            ERR("Thứ tự fragment sai: nhận %d, mong %d",
                 frag.frag_idx, expect);
             return EXIT_BADFRAM;
         }
@@ -500,21 +537,19 @@ static int poll_node(int fd, const Config *cfg,
                 ERR("Gửi ACK(%d) thất bại", frag.frag_idx);
                 return EXIT_ERR;
             }
+            expect++;
         } else {
-            LOG("Fragment cuối – không gửi ACK");
+            LOG("Fragment cuối nhận xong");
             break;
         }
-
-        expect++;
     }
 
     buf[buf_len] = '\0';
     if ((size_t)(buf_len + 1) > json_size) {
-        ERR("json_out buffer quá nhỏ");
+        ERR("json_out buffer quá nhỏ (%zu cần %d)", json_size, buf_len + 1);
         return EXIT_ERR;
     }
     memcpy(json_out, buf, (size_t)(buf_len + 1));
-    LOG("Reassemble OK – %d bytes JSON", buf_len);
     return EXIT_OK;
 }
 
