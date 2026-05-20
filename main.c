@@ -40,6 +40,7 @@
  *
  *  E32 Fixed-TX prefix (GW prepend khi gửi):
  *    [DST_ADDH][DST_ADDL][CH]  3 bytes
+ 
  * ══════════════════════════════════════════════════════════════
  */
 
